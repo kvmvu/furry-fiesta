@@ -1,4 +1,4 @@
-import datetime
+from datetime import date, datetime
 from .models import UnpaidCheque
 from .serializers import UnpaidChequeSerializer, UserSerializer
 from .permissions import IsOwnerOrReadOnly
@@ -7,6 +7,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework.reverse import reverse
 from django.contrib.auth.models import User
+from asgiref.sync import sync_to_async
 from zeep import Client
 
 import os
@@ -29,6 +30,7 @@ wsdls = {
 }
 
 # entry point for the API
+@sync_to_async
 @api_view(['GET'])
 def api_root(request, format=None):
     return Response({
@@ -79,7 +81,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         cheque_number = request_string_list[1]
         reason_code = request_string_list[2]
         cheque_amount = request_string_list[3]
-        cheque_value_date = request_string_list[4]
+        cheque_value_date = datetime.strptime(request_string_list[4], '%Y%m%d').date()
         ft_ref = request_string_list[5]
 
         # create dictionary
@@ -183,7 +185,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         # create a dictionary to hold the request parameters
         request_parameters = {
             'WebRequestCommon': {
-                'company': response['Status']['Company'],
+                'company': response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['COCODE'],
                 'password': tws_password,  # env variable
                 'userName': tws_user, # env variable
             },
@@ -193,7 +195,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # this tag has an attribute called 'id' which is required and it has child a child tag called 'CHQSTATUS' 
             # whose value is 'RETURNED'
             'CHEQUECOLLECTIONUNPAYType': {
-                'id': response['Status']['Id'],
+                'id': response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['ID'],
                 'CHQSTATUS': 'RETURNED'
             }
         }
@@ -226,21 +228,29 @@ class UnpaidViewSet(viewsets.ModelViewSet):
 
         # get the successIndicator and error message (if any) from the response in a try block because the response may not have the successIndicator tag
         success_indicator = response['Status']['successIndicator']
-        messages = response['Status']['messages'][0]
+        # if the successIndicator is 'Success', then there might be no error message. So we need to check if there is an error message tag
+        try:
+            messages = response['Status']['messages'][0]
+        except:
+            messages = None
+        
 
         # update request_dict with the is_unpaid field, marked_unpaid_at, cc_record fields
         if success_indicator == 'Success':
             request_dict['is_unpaid'] = True
             request_dict['marked_unpaid_at'] = datetime.now()
+            # request_dict['marked_unpaid_at'] = str(date.today())
             request_dict['cc_record'] = response['Status']['transactionId']
             request_dict['t24_success_indicator'] = success_indicator
             request_dict['t24_error_message'] = ''
+            request_dict['owner'] = self.request.user
         else:
             request_dict['is_unpaid'] = False
             request_dict['marked_unpaid_at'] = None
             request_dict['cc_record'] = ''
             request_dict['t24_success_indicator'] = success_indicator
             request_dict['t24_error_message'] = messages
+            request_dict['owner'] = self.request.user
 
             # log the error from the web service
             logger.error(messages)
@@ -287,6 +297,8 @@ class UnpaidViewSet(viewsets.ModelViewSet):
 
         # evaluate the response from the unpay_cheque web service
         validated_request_dict = self.evaluate_soap_response(validated_request_dict, response)
+        # log the validated_request_dict
+        logger.info(validated_request_dict)
 
         # create an UnpaidCheque object from the validated_request_dict and return the API response in a try block
         try:

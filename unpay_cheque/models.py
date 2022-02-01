@@ -5,7 +5,7 @@ class UnpaidCheque(models.Model):
     original_string = models.CharField(max_length=100)
     voucher_code = models.CharField(max_length=3)
     cheque_number = models.CharField(max_length=100)
-    unpay_reason_code = models.CharField(max_length=3)
+    reason_code = models.CharField(max_length=3)
     cheque_amount = models.DecimalField(max_digits=9, decimal_places=2)
     cheque_value_date = models.DateField()
     ft_ref = models.CharField(max_length=100, blank=True, null=True)
