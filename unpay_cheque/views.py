@@ -22,11 +22,13 @@ tws_password = os.environ.get('TWS_PWD')
 tws_co_code = os.environ.get('TWS_CO')
 test_unpay_cheque_ws = os.environ.get('TEST_UNPAY_CHEQUE_URL')
 test_query_cc_ws = os.environ.get('TEST_QUERY_CC_URL')
+test_unpaid_charge_ws = os.environ.get('TEST_CHARGE_UNPAID_URL')
 
 # setup zeep client wsdls
 wsdls = {
     'unpay_cheque': test_unpay_cheque_ws,
-    'query_cc': test_query_cc_ws
+    'query_cc': test_query_cc_ws,
+    'unpaid_charge': test_unpaid_charge_ws
 }
 
 # entry point for the API
@@ -75,7 +77,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         methods of the class. It then logs the original request and the formatted request 
         to incoming and outgoing logs respectively.
         """
-        request_string = request.data['original_string']
+        request_string = request.data['raw_string']
         request_string_list = request_string.split('-')
         voucher_code = request_string_list[0]
         cheque_number = request_string_list[1]
@@ -86,6 +88,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
 
         # create dictionary
         request_dict = {
+            'raw_string': request_string,
             'voucher_code': voucher_code,
             'cheque_number': cheque_number,
             'reason_code': reason_code,
@@ -214,6 +217,45 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             return {'error': 'error calling T24 unpay web service'}
 
 
+     # when a cheque is marked as unpaid, this method is called to send a charge request to the unpaid_charge web service
+    def create_charge_soap_request(self, response):
+        """this method takes the response from query_cc_soap_request and creates a charge request for the unpaid cheque."""
+        # create a logger object
+        logger = self.setup_logger('charge_soap_request', 'logs/t24_charge_info.log')
+
+        # create a client object
+        client = Client(wsdls['unpaid_charge'])
+
+        # create a dictionary to hold the request parameters
+        request_parameters = {
+            'WebRequestCommon': {
+                'company': tws_co_code, # env variable
+                'password': tws_password,  # env variable
+                'userName': tws_user, # env variable
+            },
+            'OfsFunction': {
+                'gtsControl': 0
+            },
+            'ACCHARGEREQUESTINUNPAIDType': {
+                'DEBITACCOUNT': response['CHEQUECOLLECTIONType']['gCREDITACCNO']['mCREDITACCNO'][0]['CREDITACCNO'],
+                'CHARGEDETAIL': 'BENONLY', 
+            }
+        }
+
+        # call the web service in a try block
+        try:
+            response = client.service.InputUnpaidCharge(**request_parameters)
+            # log the response
+            logger.info(response)
+            # return the response
+            return response
+        except Exception as e:
+            # log the error
+            logger.error(e)
+            # return the error message
+            return {'error': 'error calling T24 charge web service'}
+
+
     # helper method to evaluate the response from the SOAP request.
     def evaluate_soap_response(self, request_dict, response):
         """This method gets called if there is a response from the create_unpay_soap_request method. It receives the 
@@ -221,7 +263,8 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         with details from the response and returns the updated request_dict. It checks if the successIndicator is 
         'Success' and marks is_unpaid as True. If the successIndicator is not 'Success', it logs the error message 
         and marks is_unpaid as False. It also reads the transactionId and saves it as the cc_record in the dictionary 
-        to be used in the UnpayCheque object. It also marks the marked_unpaid_at as the current time."""
+        to be used in the UnpayCheque object. It also marks the marked_unpaid_at as the current time. If is_unpaid is
+        true, it also calls the create_charge_soap_request method to send a charge request to the unpaid_charge web."""
         
         # create a logger object
         logger = self.setup_logger('eval_response', 'logs/t24_unpay_info.log')
@@ -240,19 +283,51 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             request_dict['is_unpaid'] = True
             request_dict['marked_unpaid_at'] = datetime.now()
             request_dict['cc_record'] = response['Status']['transactionId']
-            request_dict['t24_success_indicator'] = success_indicator
-            request_dict['t24_error_message'] = ''
+            request_dict['unpay_success_indicator'] = success_indicator
+            request_dict['unpay_error_message'] = ''
             request_dict['owner'] = self.request.user
         else:
             request_dict['is_unpaid'] = False
             request_dict['marked_unpaid_at'] = None
             request_dict['cc_record'] = ''
-            request_dict['t24_success_indicator'] = success_indicator
-            request_dict['t24_error_message'] = messages
+            request_dict['unpay_success_indicator'] = success_indicator
+            request_dict['unpay_error_message'] = messages
             request_dict['owner'] = self.request.user
 
             # log the error from the web service
             logger.error(messages)
+
+        # create charge request if is_unpaid is true and update the request_dict with
+        # charge_is_paid, charge_paid_at, charge_id and charge account if the charge response
+        # is successful
+        if request_dict['is_unpaid']:
+            charge_response = self.create_charge_soap_request(response)
+            # get the successIndicator and error message (if any) from the response in a try block because the response may not have the successIndicator tag
+            charge_success_indicator = charge_response['Status']['successIndicator']
+            # if the successIndicator is 'Success', then there might be no error message. So we need to check if there is an error message tag
+            try:
+                charge_messages = charge_response['Status']['messages'][0]
+            except:
+                charge_messages = None
+
+            # update request_dict with the charge_is_paid field, charge_paid_at, charge_id and charge account
+            if charge_success_indicator == 'Success':
+                request_dict['charge_is_paid'] = True
+                request_dict['charge_paid_at'] = datetime.strptime(charge_response['ACCHARGEREQUESTType']['gDATETIME']['DATETIME'][0], '%y-%m-%d %H:%M')
+                request_dict['charge_id'] = charge_response['ACCHARGEREQUESTType']['id']
+                request_dict['charge_account'] = charge_response['ACCHARGEREQUESTType']['DEBITACCOUNT']
+                request_dict['charge_success_indicator'] = charge_success_indicator
+                request_dict['charge_error_message'] = ''
+            else:
+                request_dict['charge_is_paid'] = False
+                request_dict['charge_paid_at'] = None
+                request_dict['charge_id'] = ''
+                request_dict['charge_account'] = ''
+                request_dict['charge_success_indicator'] = charge_success_indicator
+                request_dict['charge_error_message'] = charge_messages
+
+                # log the error from the web service
+                logger.error(charge_messages)
 
         # return the updated request_dict
         return request_dict
@@ -310,7 +385,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
                 'is_unpaid': unpaid_cheque.is_unpaid,
                 'marked_unpaid_at': unpaid_cheque.marked_unpaid_at,
                 'cc_record': unpaid_cheque.cc_record,
-                't24_success_indicator': unpaid_cheque.t24_success_indicator
+                'unpay_success_indicator': unpaid_cheque.unpay_success_indicator,
+                'charge_is_paid': unpaid_cheque.charge_is_paid,
+                'charge_paid_at': unpaid_cheque.charge_paid_at,
+                'charge_id': unpaid_cheque.charge_id,
+                'charge_account': unpaid_cheque.charge_account,
             }
             # return the response
             return Response(response_dict, status=status.HTTP_201_CREATED)

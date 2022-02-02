@@ -4,14 +4,14 @@ from django.contrib.auth.models import User
 
 
 class UnpaidChequeSerializer(serializers.HyperlinkedModelSerializer):
-    original_string = serializers.CharField(max_length=100)
+    raw_string = serializers.CharField(max_length=100)
     owner = serializers.ReadOnlyField(source='owner.username')
     posted_at = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = UnpaidCheque
 
-        fields = ['original_string', 'owner', 'posted_at']
+        fields = ['raw_string', 'owner', 'posted_at']
 
 
 class UserSerializer(serializers.HyperlinkedModelSerializer):
