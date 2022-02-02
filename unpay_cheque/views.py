@@ -239,7 +239,6 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         if success_indicator == 'Success':
             request_dict['is_unpaid'] = True
             request_dict['marked_unpaid_at'] = datetime.now()
-            # request_dict['marked_unpaid_at'] = str(date.today())
             request_dict['cc_record'] = response['Status']['transactionId']
             request_dict['t24_success_indicator'] = success_indicator
             request_dict['t24_error_message'] = ''
