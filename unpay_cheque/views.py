@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime
 from .models import UnpaidCheque
 from .serializers import UnpaidChequeSerializer, UserSerializer
 from .permissions import IsOwnerOrReadOnly
@@ -15,6 +15,7 @@ import logging
 
 # logging formatters
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+current_date = datetime.now().strftime('%Y-%m-%d')
 
 # setup environment variables
 tws_user = os.environ.get('TWS_USER')
@@ -55,7 +56,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
     def setup_logger(self, name, log_file, level=logging.INFO):
         """To setup as many loggers as you want"""
         # log_dir = os.path.dirname(log_file)
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'logs')
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), f'logs/{current_date}')
 
         if not os.path.exists(log_dir):
             os.makedirs(log_dir)
@@ -83,7 +84,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         cheque_number = request_string_list[1]
         reason_code = request_string_list[2]
         cheque_amount = request_string_list[3]
-        cheque_value_date = datetime.strptime(request_string_list[4], '%Y%m%d').date()
+        cheque_value_date = datetime.strptime(request_string_list[4], '%Y%m%d').strftime('%Y-%m-%d')
         ft_ref = request_string_list[5]
 
         # create dictionary
@@ -98,7 +99,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         }
 
         # log the raw incoming request as well as the formatted request to incoming log file at INFO level
-        logger = self.setup_logger('incoming', 'logs/incoming_requests.log')
+        logger = self.setup_logger('incoming', f'logs/{current_date}/incoming_requests.log')
         logger.info('raw request: ' + request_string)
         logger.info('formatted request: ' + str(request_dict))
 
@@ -112,7 +113,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         It returns a dictionary with the validated input. If the input is invalid, 
         it returns an error message
         """
-        logger = self.setup_logger('request_validation', 'logs/request_errors.log')
+        logger = self.setup_logger('request_validation', f'logs/{current_date}/request_errors.log')
         # validate the voucher_code
         if request_dict['voucher_code'] != '09':
             # log the error and return the error message
@@ -137,7 +138,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         this method to calls the query_cc web service to get the matching CC record for the input FT ref. The CC 
         record is contained in the response. The method returns a response or an error message.
         """
-        logger = self.setup_logger('query_CC', 'logs/t24_cc_query_info.log')
+        logger = self.setup_logger('query_CC', f'logs/{current_date}/t24_cc_query_info.log')
         # create a client object
         client = Client(wsdls['query_cc'])
         # create a dictionary to hold the request parameters
@@ -165,8 +166,10 @@ class UnpaidViewSet(viewsets.ModelViewSet):
                 # message as a warning and return the error message
                 logger.warning('No CC record found for ft_ref - ' + request_dict['ft_ref'])
                 return {'error': 'No CC record found for ft_ref - ' + request_dict['ft_ref']}               
-            # log the response
-            logger.info(response)
+            # log the CC ID, FT ref, account number in one line and return the response
+            logger.info('CC ID - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['ID'] + 
+                        ', FT ref - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['TXNID'] + 
+                        ', account number - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['CREDITACCNO'])
             return response
         except Exception as e:
             # log the error
@@ -182,7 +185,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         web service contains the CC record and the CO CODE from the query web service response. The method returns
         the response from the unpay cheque web service or an error message.
         """
-        logger = self.setup_logger('unpay_cheque', 'logs/t24_unpay_info.log')
+        logger = self.setup_logger('unpay_cheque', f'logs/{current_date}/t24_unpay_info.log')
         # create a client object
         client = Client(wsdls['unpay_cheque'])
         # create a dictionary to hold the request parameters
@@ -206,8 +209,13 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         # call the web service in a try block
         try:
             response = client.service.UnpayChequeWebService(**request_parameters)
-            # log the response
-            logger.info(response)
+            # log the successIndicator, transactionId, messageId, TXNID and CHQSTATUS in one line
+            # and return the response
+            logger.info('successIndicator - ' + response['Status']['successIndicator'] +
+                        ', cc_id - ' + response['Status']['transactionId'] +
+                        ', ofs_id - ' + response['Status']['messageId'] +
+                        ', ft_ref - ' + response['CHEQUECOLLECTIONType']['TXNID'] +
+                        ', cheque_status - ' + response['CHEQUECOLLECTIONType']['CHQSTATUS'])
             # return the response
             return response
         except Exception as e:
@@ -221,7 +229,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
     def create_charge_soap_request(self, response):
         """this method takes the response from query_cc_soap_request and creates a charge request for the unpaid cheque."""
         # create a logger object
-        logger = self.setup_logger('charge_soap_request', 'logs/t24_charge_info.log')
+        logger = self.setup_logger('charge_soap_request', f'logs/{current_date}/t24_charge_info.log')
 
         # create a client object
         client = Client(wsdls['unpaid_charge'])
@@ -245,8 +253,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         # call the web service in a try block
         try:
             response = client.service.InputUnpaidCharge(**request_parameters)
-            # log the response
-            logger.info(response)
+            # log the successIndicator, transactionId, messageId, DEBITACCOUNT in one line and return the response
+            logger.info('successIndicator - ' + response['Status']['successIndicator'] +
+                        ', charge_id - ' + response['Status']['transactionId'] +
+                        ', ofs_id - ' + response['Status']['messageId'] +
+                        ', debit_account - ' + response['ACCHARGEREQUESTType']['DEBITACCOUNT'])
             # return the response
             return response
         except Exception as e:
@@ -267,7 +278,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         true, it also calls the create_charge_soap_request method to send a charge request to the unpaid_charge web."""
         
         # create a logger object
-        logger = self.setup_logger('eval_response', 'logs/t24_unpay_info.log')
+        logger = self.setup_logger('eval_response', f'logs/{current_date}/t24_unpay_info.log')
 
         # get the successIndicator and error message (if any) from the response in a try block because the response may not have the successIndicator tag
         success_indicator = response['Status']['successIndicator']
@@ -281,7 +292,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         # update request_dict with the is_unpaid field, marked_unpaid_at, cc_record fields
         if success_indicator == 'Success':
             request_dict['is_unpaid'] = True
-            request_dict['marked_unpaid_at'] = datetime.now()
+            request_dict['marked_unpaid_at'] = datetime.strptime(response['CHEQUECOLLECTIONType']['gDATETIME']['DATETIME'][0], '%y%m%d%H%M').strftime('%Y-%m-%d %H:%M')
             request_dict['cc_record'] = response['Status']['transactionId']
             request_dict['unpay_success_indicator'] = success_indicator
             request_dict['unpay_error_message'] = ''
@@ -313,7 +324,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # update request_dict with the charge_is_paid field, charge_paid_at, charge_id and charge account
             if charge_success_indicator == 'Success':
                 request_dict['charge_is_paid'] = True
-                request_dict['charge_paid_at'] = datetime.strptime(charge_response['ACCHARGEREQUESTType']['gDATETIME']['DATETIME'][0], '%y-%m-%d %H:%M')
+                request_dict['charge_paid_at'] = datetime.strptime(charge_response['ACCHARGEREQUESTType']['gDATETIME']['DATETIME'][0], '%y%m%d%H%M').strftime('%Y-%m-%d %H:%M')
                 request_dict['charge_id'] = charge_response['ACCHARGEREQUESTType']['id']
                 request_dict['charge_account'] = charge_response['ACCHARGEREQUESTType']['DEBITACCOUNT']
                 request_dict['charge_success_indicator'] = charge_success_indicator
@@ -344,7 +355,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         It returns an API response based on success or failure of the request. The API response also 
         includes details of the UnpaidCheque object."""
         # create a logger object
-        logger = self.setup_logger('api_response', 'logs/API_response_error.log')
+        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response_error.log')
         # read the request
         request_dict = self.string_to_dict(request)
 
@@ -386,6 +397,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
                 'marked_unpaid_at': unpaid_cheque.marked_unpaid_at,
                 'cc_record': unpaid_cheque.cc_record,
                 'unpay_success_indicator': unpaid_cheque.unpay_success_indicator,
+                'ft_ref': unpaid_cheque.ft_ref,
                 'charge_is_paid': unpaid_cheque.charge_is_paid,
                 'charge_paid_at': unpaid_cheque.charge_paid_at,
                 'charge_id': unpaid_cheque.charge_id,
