@@ -1,6 +1,6 @@
 from datetime import datetime
-from .models import UnpaidCheque
-from .serializers import UnpaidChequeSerializer, UserSerializer
+from .models import UnpaidCheque, Charge
+from .serializers import UnpaidChequeSerializer, UserSerializer, ChargeSerializer
 from .permissions import IsOwnerOrReadOnly
 from rest_framework import permissions, viewsets, status
 from rest_framework.decorators import api_view
@@ -225,48 +225,6 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             return {'error': 'error calling T24 unpay web service'}
 
 
-     # when a cheque is marked as unpaid, this method is called to send a charge request to the unpaid_charge web service
-    def create_charge_soap_request(self, response):
-        """this method takes the response from query_cc_soap_request and creates a charge request for the unpaid cheque."""
-        # create a logger object
-        logger = self.setup_logger('charge_soap_request', f'logs/{current_date}/t24_charge_info.log')
-
-        # create a client object
-        client = Client(wsdls['unpaid_charge'])
-
-        # create a dictionary to hold the request parameters
-        request_parameters = {
-            'WebRequestCommon': {
-                'company': tws_co_code, # env variable
-                'password': tws_password,  # env variable
-                'userName': tws_user, # env variable
-            },
-            'OfsFunction': {
-                'gtsControl': 0
-            },
-            'ACCHARGEREQUESTINUNPAIDType': {
-                'DEBITACCOUNT': response['CHEQUECOLLECTIONType']['gCREDITACCNO']['mCREDITACCNO'][0]['CREDITACCNO'],
-                'CHARGEDETAIL': 'BENONLY', 
-            }
-        }
-
-        # call the web service in a try block
-        try:
-            response = client.service.InputUnpaidCharge(**request_parameters)
-            # log the successIndicator, transactionId, messageId, DEBITACCOUNT in one line and return the response
-            logger.info('successIndicator - ' + response['Status']['successIndicator'] +
-                        ', charge_id - ' + response['Status']['transactionId'] +
-                        ', ofs_id - ' + response['Status']['messageId'] +
-                        ', debit_account - ' + response['ACCHARGEREQUESTType']['DEBITACCOUNT'])
-            # return the response
-            return response
-        except Exception as e:
-            # log the error
-            logger.error(e)
-            # return the error message
-            return {'error': 'error calling T24 charge web service'}
-
-
     # helper method to evaluate the response from the SOAP request.
     def evaluate_soap_response(self, request_dict, response):
         """This method gets called if there is a response from the create_unpay_soap_request method. It receives the 
@@ -432,6 +390,80 @@ class UnpaidViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
 
+
+class ChargeViewSet(viewsets.ModelViewSet):
+    """
+    API endpoint that allows charges to be viewed or edited.
+    """
+    queryset = Charge.objects.all()
+    serializer_class = ChargeSerializer
+
+    # helper method to validate that charge has not been collected already for inputted cc_record
+    def validate_charge_not_collected(self, request):
+        # create a logger object
+        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response_error.log')
+        # check if the charge has already been collected
+        try:
+            charge = Charge.objects.get(cc_record=request.data['cc_record'])
+            if charge.is_collected:
+                return {'error': 'charge has already been collected'}
+        except Charge.DoesNotExist:
+            pass
+        return None
+
+    # this method is called to send a charge request to the unpaid_charge web service
+    def create_charge_soap_request(self, request):
+        """this method takes the response from query_cc_soap_request and creates a charge request for the unpaid cheque."""
+        # create a logger object
+        logger = self.setup_logger('charge_soap_request', f'logs/{current_date}/t24_charge_info.log')
+
+        # create a client object
+        client = Client(wsdls['unpaid_charge'])
+
+        # create a dictionary to hold the request parameters
+        request_parameters = {
+            'WebRequestCommon': {
+                'company': tws_co_code, # env variable
+                'password': tws_password,  # env variable
+                'userName': tws_user, # env variable
+            },
+            'OfsFunction': {
+                'gtsControl': 0
+            },
+            'ACCHARGEREQUESTINUNPAIDType': {
+                'DEBITACCOUNT': request.data['charge_account'],
+                'CHARGEDETAIL': 'BENONLY', 
+            }
+        }
+
+        # call the web service in a try block
+        try:
+            response = client.service.InputUnpaidCharge(**request_parameters)
+            # create a response dictionary
+            response_dict = {
+                'charge_success_indicator': response['Status']['successIndicator'],
+                'charge_id': response['Status']['transactionId'],
+                'ofs_id': response['Status']['messageId'],
+                'charge_account': response['ACCHARGEREQUESTType']['DEBITACCOUNT'],
+                'cc_record': request.data['cc_record'],
+            }
+
+            # log the successIndicator, transactionId, messageId, DEBITACCOUNT in one line and return the response
+            logger.info(response_dict)
+            # return a response dictionary that we'll use to create the Charge object
+            return response
+        except Exception as e:
+            # log the error
+            logger.error(e)
+            # return the error message
+            return {'error': 'error calling T24 charge web service'}
+
+    # create a charge for a given unpaid cheque object
+    def create(self, request, *args, **kwargs):
+        
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
 
 class UserViewSet(viewsets.ReadOnlyModelViewSet):
     """

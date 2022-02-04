@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import UnpaidCheque
+from .models import UnpaidCheque, Charge
 from django.contrib.auth.models import User
 
 
@@ -20,3 +20,15 @@ class UserSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = User
         fields = ['url', 'id', 'username', 'unpaid_cheques']
+
+
+class ChargeSerializer(serializers.HyperlinkedModelSerializer):
+    owner = serializers.ReadOnlyField(source='owner.username')
+    cc_record = serializers.HyperlinkedRelatedField(view_name='unpaid-cheque-details', read_only=True)
+
+    class Meta:
+        model = Charge
+        fields = ['charge_id', 'charge_account', 'charge_amount', 'charge_value_date', 'charge_success_indicator',
+                  'charge_error_message', 'owner', 'cc_record']
+        read_only_fields = ['charge_id', 'charge_amount', 'charge_value_date', 'charge_success_indicator', 
+                            'charge_error_message', 'owner', 'cc_record']
