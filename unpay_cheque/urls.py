@@ -6,6 +6,7 @@ from unpay_cheque import views
 router = DefaultRouter()
 router.register(r'unpaids', views.UnpaidViewSet)
 router.register(r'users', views.UserViewSet)
+router.register(r'charges', views.ChargeViewSet)
 
 # The API URLs are now determined automatically by the router.
 urlpatterns = [

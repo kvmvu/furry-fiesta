@@ -9,6 +9,8 @@ from rest_framework.reverse import reverse
 from django.contrib.auth.models import User
 from asgiref.sync import sync_to_async
 from zeep import Client
+from dotenv import load_dotenv
+from pathlib import Path
 
 import os
 import logging
@@ -18,12 +20,15 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 current_date = datetime.now().strftime('%Y-%m-%d')
 
 # setup environment variables
-tws_user = os.environ.get('TWS_USER')
-tws_password = os.environ.get('TWS_PWD')
-tws_co_code = os.environ.get('TWS_CO')
-test_unpay_cheque_ws = os.environ.get('TEST_UNPAY_CHEQUE_URL')
-test_query_cc_ws = os.environ.get('TEST_QUERY_CC_URL')
-test_unpaid_charge_ws = os.environ.get('TEST_CHARGE_UNPAID_URL')
+dotenv_path = Path('test.env')
+load_dotenv(dotenv_path=dotenv_path)
+
+tws_user = os.getenv('TWS_USER')
+tws_password = os.getenv('TWS_PWD')
+tws_co_code = os.getenv('TWS_CO')
+test_unpay_cheque_ws = os.getenv('TEST_UNPAY_CHEQUE_URL')
+test_query_cc_ws = os.getenv('TEST_QUERY_CC_URL')
+test_unpaid_charge_ws = os.getenv('TEST_CHARGE_UNPAID_URL')
 
 # setup zeep client wsdls
 wsdls = {
@@ -172,8 +177,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
                         ', account number - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['CREDITACCNO'])
             return response
         except Exception as e:
-            # log the error
-            logger.error(e)
+            # log the T24 error if any else log the error
+            if response['Status']['messages']:
+                logger.error('T24 error: ' + response['Status']['messages'][0])
+            else:
+                logger.error(e)
             # return the error message
             return {'error': 'error calling T24 CC query web service'}
 
@@ -219,8 +227,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # return the response
             return response
         except Exception as e:
-            # log the error
-            logger.error(e)
+            # log the T24 error if any else log the error
+            if response['Status']['messages']:
+                logger.error('T24 error: ' + response['Status']['messages'][0])
+            else:
+                logger.error(e)
             # return the error message
             return {'error': 'error calling T24 unpay web service'}
 
@@ -266,38 +277,6 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # log the error from the web service
             logger.error(messages)
 
-        # create charge request if is_unpaid is true and update the request_dict with
-        # charge_is_paid, charge_paid_at, charge_id and charge account if the charge response
-        # is successful
-        if request_dict['is_unpaid']:
-            charge_response = self.create_charge_soap_request(response)
-            # get the successIndicator and error message (if any) from the response in a try block because the response may not have the successIndicator tag
-            charge_success_indicator = charge_response['Status']['successIndicator']
-            # if the successIndicator is 'Success', then there might be no error message. So we need to check if there is an error message tag
-            try:
-                charge_messages = charge_response['Status']['messages'][0]
-            except:
-                charge_messages = None
-
-            # update request_dict with the charge_is_paid field, charge_paid_at, charge_id and charge account
-            if charge_success_indicator == 'Success':
-                request_dict['charge_is_paid'] = True
-                request_dict['charge_paid_at'] = datetime.strptime(charge_response['ACCHARGEREQUESTType']['gDATETIME']['DATETIME'][0], '%y%m%d%H%M').strftime('%Y-%m-%d %H:%M')
-                request_dict['charge_id'] = charge_response['ACCHARGEREQUESTType']['id']
-                request_dict['charge_account'] = charge_response['ACCHARGEREQUESTType']['DEBITACCOUNT']
-                request_dict['charge_success_indicator'] = charge_success_indicator
-                request_dict['charge_error_message'] = ''
-            else:
-                request_dict['charge_is_paid'] = False
-                request_dict['charge_paid_at'] = None
-                request_dict['charge_id'] = ''
-                request_dict['charge_account'] = ''
-                request_dict['charge_success_indicator'] = charge_success_indicator
-                request_dict['charge_error_message'] = charge_messages
-
-                # log the error from the web service
-                logger.error(charge_messages)
-
         # return the updated request_dict
         return request_dict
 
@@ -313,7 +292,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         It returns an API response based on success or failure of the request. The API response also 
         includes details of the UnpaidCheque object."""
         # create a logger object
-        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response_error.log')
+        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response.log')
         # read the request
         request_dict = self.string_to_dict(request)
 
@@ -352,14 +331,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # create a response dictionary
             response_dict = {
                 'is_unpaid': unpaid_cheque.is_unpaid,
-                'marked_unpaid_at': unpaid_cheque.marked_unpaid_at,
+                'unpaid_value_date': unpaid_cheque.unpaid_value_date,
                 'cc_record': unpaid_cheque.cc_record,
                 'unpay_success_indicator': unpaid_cheque.unpay_success_indicator,
                 'ft_ref': unpaid_cheque.ft_ref,
-                'charge_is_paid': unpaid_cheque.charge_is_paid,
-                'charge_paid_at': unpaid_cheque.charge_paid_at,
-                'charge_id': unpaid_cheque.charge_id,
-                'charge_account': unpaid_cheque.charge_account,
+                'cheque_number': unpaid_cheque.cheque_number,
             }
             # return the response
             return Response(response_dict, status=status.HTTP_201_CREATED)
@@ -401,12 +377,14 @@ class ChargeViewSet(viewsets.ModelViewSet):
     # helper method to validate that charge has not been collected already for inputted cc_record
     def validate_charge_not_collected(self, request):
         # create a logger object
-        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response_error.log')
+        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response.log')
         # check if the charge has already been collected
         try:
             charge = Charge.objects.get(cc_record=request.data['cc_record'])
             if charge.is_collected:
-                return {'error': 'charge has already been collected'}
+                # log the error from the web service
+                logger.error('charge already collected for cc_record: ' + request.data['cc_record'])
+                return Response({'error': 'charge has already been collected'}, status=status.HTTP_400_BAD_REQUEST)
         except Charge.DoesNotExist:
             pass
         return None
@@ -453,13 +431,49 @@ class ChargeViewSet(viewsets.ModelViewSet):
             # return a response dictionary that we'll use to create the Charge object
             return response
         except Exception as e:
-            # log the error
-            logger.error(e)
+            # log the T24 error if any else log the error
+            if response['Status']['messages']:
+                logger.error('T24 error: ' + response['Status']['messages'][0])
+            else:
+                logger.error(e)
             # return the error message
             return {'error': 'error calling T24 charge web service'}
 
     # create a charge for a given unpaid cheque object
     def create(self, request, *args, **kwargs):
+        """
+        Creates a charge for a given unpaid cheque object.
+        """
+        # create a logger object
+        logger = self.setup_logger('charge', f'logs/{current_date}/API_response.log')
+
+        # validate that the charge has not already been collected
+        if self.validate_charge_not_collected(request):
+            return Response(self.validate_charge_not_collected(request), status=status.HTTP_400_BAD_REQUEST)
+
+        # call the web service in a try block
+        try:
+            # call the web service
+            response = self.create_charge_soap_request(request)
+
+            # if the response is an error message, return an error message
+            if 'error' in response:
+                return Response(response, status=status.HTTP_400_BAD_REQUEST)
+
+            # create a response dictionary
+            response_dict = {
+                'charge_success_indicator': response['charge_success_indicator'],
+                'charge_id': response['charge_id'],
+                'ofs_id': response['ofs_id'],
+                'charge_account': response['charge_account'],
+                'cc_record': response['cc_record'],
+            }
+            # return the response
+            return Response(response_dict, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            # log the error from the API response creation and return an error message 
+            logger.error(e)
+            return Response({'error': 'error creating object'}, status=status.HTTP_400_BAD_REQUEST)
         
 
     def perform_create(self, serializer):
