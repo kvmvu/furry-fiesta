@@ -29,6 +29,6 @@ class ChargeSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = Charge
         fields = ['charge_id', 'charge_account', 'charge_amount', 'charge_value_date', 'charge_success_indicator',
-                  'charge_error_message', 'owner', 'cc_record']
+                  'charge_error_message', 'owner', 'cc_record', 'ofs_id', 'ft_ref', 'is_collected']
         read_only_fields = ['charge_id', 'charge_amount', 'charge_value_date', 'charge_success_indicator', 
-                            'charge_error_message', 'owner', 'cc_record']
+                            'charge_error_message', 'owner', 'cc_record', 'ofs_id', 'is_collected']

@@ -2,40 +2,19 @@ from datetime import datetime
 from .models import UnpaidCheque, Charge
 from .serializers import UnpaidChequeSerializer, UserSerializer, ChargeSerializer
 from .permissions import IsOwnerOrReadOnly
+from .helpers import Helpers
 from rest_framework import permissions, viewsets, status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework.reverse import reverse
 from django.contrib.auth.models import User
 from asgiref.sync import sync_to_async
-from zeep import Client
-from dotenv import load_dotenv
-from pathlib import Path
 
-import os
-import logging
 
-# logging formatters
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 current_date = datetime.now().strftime('%Y-%m-%d')
 
-# setup environment variables
-dotenv_path = Path('test.env')
-load_dotenv(dotenv_path=dotenv_path)
-
-tws_user = os.getenv('TWS_USER')
-tws_password = os.getenv('TWS_PWD')
-tws_co_code = os.getenv('TWS_CO')
-test_unpay_cheque_ws = os.getenv('TEST_UNPAY_CHEQUE_URL')
-test_query_cc_ws = os.getenv('TEST_QUERY_CC_URL')
-test_unpaid_charge_ws = os.getenv('TEST_CHARGE_UNPAID_URL')
-
-# setup zeep client wsdls
-wsdls = {
-    'unpay_cheque': test_unpay_cheque_ws,
-    'query_cc': test_query_cc_ws,
-    'unpaid_charge': test_unpaid_charge_ws
-}
+# object of the Helper class
+helper = Helpers()
 
 # entry point for the API
 @sync_to_async
@@ -43,7 +22,8 @@ wsdls = {
 def api_root(request, format=None):
     return Response({
         'users': reverse('user-list', request=request, format=format),
-        'unpaids': reverse('unpaid-cheques-list', request=request, format=format)
+        'unpaids': reverse('unpaid-cheques-list', request=request, format=format),
+        'charges': reverse('charge-list', request=request, format=format)
     })
 
 
@@ -56,233 +36,11 @@ class UnpaidViewSet(viewsets.ModelViewSet):
     serializer_class = UnpaidChequeSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly,
                           IsOwnerOrReadOnly]
-
-    # helper method to setup logging
-    def setup_logger(self, name, log_file, level=logging.INFO):
-        """To setup as many loggers as you want"""
-        # log_dir = os.path.dirname(log_file)
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), f'logs/{current_date}')
-
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
-
-        handler = logging.FileHandler(log_file)        
-        handler.setFormatter(formatter)
-
-        logger = logging.getLogger(name)
-        logger.setLevel(level)
-        logger.addHandler(handler)
-
-        return logger
-
-
-    # helper method to break down string to dictionary
-    def string_to_dict(self, request):
-        """
-        this method converts the request to a dictionary that will be used by the other 
-        methods of the class. It then logs the original request and the formatted request 
-        to incoming and outgoing logs respectively.
-        """
-        request_string = request.data['raw_string']
-        request_string_list = request_string.split('-')
-        voucher_code = request_string_list[0]
-        cheque_number = request_string_list[1]
-        reason_code = request_string_list[2]
-        cheque_amount = request_string_list[3]
-        cheque_value_date = datetime.strptime(request_string_list[4], '%Y%m%d').strftime('%Y-%m-%d')
-        ft_ref = request_string_list[5]
-
-        # create dictionary
-        request_dict = {
-            'raw_string': request_string,
-            'voucher_code': voucher_code,
-            'cheque_number': cheque_number,
-            'reason_code': reason_code,
-            'cheque_amount': cheque_amount,
-            'cheque_value_date': cheque_value_date,
-            'ft_ref': ft_ref
-        }
-
-        # log the raw incoming request as well as the formatted request to incoming log file at INFO level
-        logger = self.setup_logger('incoming', f'logs/{current_date}/incoming_requests.log')
-        logger.info('raw request: ' + request_string)
-        logger.info('formatted request: ' + str(request_dict))
-
-        return request_dict
-
-
-    # helper method to validate the input
-    def validate_input(self, request_dict):
-        """
-        this method validates the input from the API request. 
-        It returns a dictionary with the validated input. If the input is invalid, 
-        it returns an error message
-        """
-        logger = self.setup_logger('request_validation', f'logs/{current_date}/request_errors.log')
-        # validate the voucher_code
-        if request_dict['voucher_code'] != '09':
-            # log the error and return the error message
-            logger.error('Invalid voucher code')
-            return {'error': 'Invalid voucher code'}
-
-        # validate the ft_ref
-        if request_dict['ft_ref'][0:2] != 'FT':
-            # log the error and return the error message
-            logger.error('Invalid FT reference')
-            return {'error': 'Invalid FT reference'}
-
-        # if all the input is valid, return the validated input
-        return request_dict
-
-
-    # when our API is called, we have to first query a web service that gives us the CC record to unpay in T24.
-    # we are going to use the zeep library to make the call to the 1st web service to get the CC record and then
-    # use the zeep library to make the call to the 2nd web service to unpay the cheque in T24.
-    def create_query_soap_request(self, request_dict):
-        """
-        this method to calls the query_cc web service to get the matching CC record for the input FT ref. The CC 
-        record is contained in the response. The method returns a response or an error message.
-        """
-        logger = self.setup_logger('query_CC', f'logs/{current_date}/t24_cc_query_info.log')
-        # create a client object
-        client = Client(wsdls['query_cc'])
-        # create a dictionary to hold the request parameters
-        request_parameters = {
-            'WebRequestCommon': {
-                'company': tws_co_code,  # env variable
-                'password': tws_password, # env variable
-                'userName': tws_user, # env variable
-            },
-            'CBLCHQCOLType': {
-                'enquiryInputCollection': {
-                    'columnName': 'TXN.ID',
-                    'criteriaValue': request_dict['ft_ref'],
-                    'operand': 'EQ'
-                }
-            }
-        }
-        # call the web service in a try block
-        try:
-            response = client.service.GetCCWebService(**request_parameters)
-            
-            # log and return the response
-            if response['CBLCHQCOLType'][0]['ZERORECORDS']:
-                # means that there is no record found for the given ft_ref. log this
-                # message as a warning and return the error message
-                logger.warning('No CC record found for ft_ref - ' + request_dict['ft_ref'])
-                return {'error': 'No CC record found for ft_ref - ' + request_dict['ft_ref']}               
-            # log the CC ID, FT ref, account number in one line and return the response
-            logger.info('CC ID - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['ID'] + 
-                        ', FT ref - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['TXNID'] + 
-                        ', account number - ' + response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['CREDITACCNO'])
-            return response
-        except Exception as e:
-            # log the T24 error if any else log the error
-            if response['Status']['messages']:
-                logger.error('T24 error: ' + response['Status']['messages'][0])
-            else:
-                logger.error(e)
-            # return the error message
-            return {'error': 'error calling T24 CC query web service'}
-
-
-    # helper method to call the unpay_cheque web service once we have the CC record and CO CODE from the query web service
-    def create_unpay_soap_request(self, response):
-        """
-        this method creates the unpay_cheque web service request. The request that is sent to the
-        web service contains the CC record and the CO CODE from the query web service response. The method returns
-        the response from the unpay cheque web service or an error message.
-        """
-        logger = self.setup_logger('unpay_cheque', f'logs/{current_date}/t24_unpay_info.log')
-        # create a client object
-        client = Client(wsdls['unpay_cheque'])
-        # create a dictionary to hold the request parameters
-        request_parameters = {
-            'WebRequestCommon': {
-                'company': response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['COCODE'],
-                'password': tws_password,  # env variable
-                'userName': tws_user, # env variable
-            },
-            'OfsFunction': {
-                'gtsControl': 0
-            },
-            # this tag has an attribute called 'id' which is required and it has child a child tag called 'CHQSTATUS' 
-            # whose value is 'RETURNED'
-            'CHEQUECOLLECTIONUNPAYType': {
-                'id': response['CBLCHQCOLType'][0]['gCBLCHQCOLDetailType']['mCBLCHQCOLDetailType'][0]['ID'],
-                'CHQSTATUS': 'RETURNED'
-            }
-        }
-
-        # call the web service in a try block
-        try:
-            response = client.service.UnpayChequeWebService(**request_parameters)
-            # log the successIndicator, transactionId, messageId, TXNID and CHQSTATUS in one line
-            # and return the response
-            logger.info('successIndicator - ' + response['Status']['successIndicator'] +
-                        ', cc_id - ' + response['Status']['transactionId'] +
-                        ', ofs_id - ' + response['Status']['messageId'] +
-                        ', ft_ref - ' + response['CHEQUECOLLECTIONType']['TXNID'] +
-                        ', cheque_status - ' + response['CHEQUECOLLECTIONType']['CHQSTATUS'])
-            # return the response
-            return response
-        except Exception as e:
-            # log the T24 error if any else log the error
-            if response['Status']['messages']:
-                logger.error('T24 error: ' + response['Status']['messages'][0])
-            else:
-                logger.error(e)
-            # return the error message
-            return {'error': 'error calling T24 unpay web service'}
-
-
-    # helper method to evaluate the response from the SOAP request.
-    def evaluate_soap_response(self, request_dict, response):
-        """This method gets called if there is a response from the create_unpay_soap_request method. It receives the 
-        response from the create_unpay_soap_request method and the original request_dict. It updates the request_dict 
-        with details from the response and returns the updated request_dict. It checks if the successIndicator is 
-        'Success' and marks is_unpaid as True. If the successIndicator is not 'Success', it logs the error message 
-        and marks is_unpaid as False. It also reads the transactionId and saves it as the cc_record in the dictionary 
-        to be used in the UnpayCheque object. It also marks the marked_unpaid_at as the current time. If is_unpaid is
-        true, it also calls the create_charge_soap_request method to send a charge request to the unpaid_charge web."""
-        
-        # create a logger object
-        logger = self.setup_logger('eval_response', f'logs/{current_date}/t24_unpay_info.log')
-
-        # get the successIndicator and error message (if any) from the response in a try block because the response may not have the successIndicator tag
-        success_indicator = response['Status']['successIndicator']
-        # if the successIndicator is 'Success', then there might be no error message. So we need to check if there is an error message tag
-        try:
-            messages = response['Status']['messages'][0]
-        except:
-            messages = None
-        
-
-        # update request_dict with the is_unpaid field, marked_unpaid_at, cc_record fields
-        if success_indicator == 'Success':
-            request_dict['is_unpaid'] = True
-            request_dict['marked_unpaid_at'] = datetime.strptime(response['CHEQUECOLLECTIONType']['gDATETIME']['DATETIME'][0], '%y%m%d%H%M').strftime('%Y-%m-%d %H:%M')
-            request_dict['cc_record'] = response['Status']['transactionId']
-            request_dict['unpay_success_indicator'] = success_indicator
-            request_dict['unpay_error_message'] = ''
-            request_dict['owner'] = self.request.user
-        else:
-            request_dict['is_unpaid'] = False
-            request_dict['marked_unpaid_at'] = None
-            request_dict['cc_record'] = ''
-            request_dict['unpay_success_indicator'] = success_indicator
-            request_dict['unpay_error_message'] = messages
-            request_dict['owner'] = self.request.user
-
-            # log the error from the web service
-            logger.error(messages)
-
-        # return the updated request_dict
-        return request_dict
-
+    
 
     def create(self, request, *args, **kwargs):
-        """receives a request and calls the helper methods to: 
+        """
+        receives a request and calls helper methods from helpers.py to: 
         - convert request to dict, 
         - validate the dict values, 
         - call the query_cc web service,
@@ -290,40 +48,46 @@ class UnpaidViewSet(viewsets.ModelViewSet):
         - evaluate the response from the unpay_cheque web service,
         - use the request_dict to create an UnpaidCheque object. 
         It returns an API response based on success or failure of the request. The API response also 
-        includes details of the UnpaidCheque object."""
+        includes details of the UnpaidCheque object.
+        """
         # create a logger object
-        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response.log')
-        # read the request
-        request_dict = self.string_to_dict(request)
+        logger = helper.setup_logger('api_response', f'logs/{current_date}/API_response.log')
+
+        # read the request dict
+        request_dict = helper.string_to_dict(request)
 
         # validate the request
-        validated_request_dict = self.validate_input(request_dict)
+        validated_request_dict = helper.validate_input(request_dict)
 
         # if the request is invalid, return an error message
         if 'error' in validated_request_dict:
             return Response(validated_request_dict, status=status.HTTP_400_BAD_REQUEST)
 
         # call the query_cc web service
-        response = self.create_query_soap_request(validated_request_dict)
+        response = helper.create_query_soap_request(validated_request_dict)
 
         # if the response is an error message, return an error message
         if 'error' in response:
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
         # call the unpay_cheque web service
-        response = self.create_unpay_soap_request(response)
+        response = helper.create_unpay_soap_request(response)
 
         # if the response is an error message, return an error message
         if 'error' in response:
             return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
         # evaluate the response from the unpay_cheque web service
-        validated_request_dict = self.evaluate_soap_response(validated_request_dict, response)
+        validated_request_dict = helper.evaluate_soap_response(validated_request_dict, response)
+
         # log the validated_request_dict
         logger.info(validated_request_dict)
 
         # create an UnpaidCheque object from the validated_request_dict and return the API response in a try block
         try:
+            # update the request_dict with the owner field
+            validated_request_dict['owner'] = self.request.user
+            
             # create and save the UnpaidCheque object
             unpaid_cheque = UnpaidCheque(**validated_request_dict)
             unpaid_cheque.save()
@@ -331,7 +95,7 @@ class UnpaidViewSet(viewsets.ModelViewSet):
             # create a response dictionary
             response_dict = {
                 'is_unpaid': unpaid_cheque.is_unpaid,
-                'unpaid_value_date': unpaid_cheque.unpaid_value_date,
+                'unpaid_value_date': datetime.strptime(unpaid_cheque.unpaid_value_date, '%Y-%m-%d').strftime('%Y/%m/%d'),
                 'cc_record': unpaid_cheque.cc_record,
                 'unpay_success_indicator': unpaid_cheque.unpay_success_indicator,
                 'ft_ref': unpaid_cheque.ft_ref,
@@ -373,88 +137,26 @@ class ChargeViewSet(viewsets.ModelViewSet):
     """
     queryset = Charge.objects.all()
     serializer_class = ChargeSerializer
-
-    # helper method to validate that charge has not been collected already for inputted cc_record
-    def validate_charge_not_collected(self, request):
-        # create a logger object
-        logger = self.setup_logger('api_response', f'logs/{current_date}/API_response.log')
-        # check if the charge has already been collected
-        try:
-            charge = Charge.objects.get(cc_record=request.data['cc_record'])
-            if charge.is_collected:
-                # log the error from the web service
-                logger.error('charge already collected for cc_record: ' + request.data['cc_record'])
-                return Response({'error': 'charge has already been collected'}, status=status.HTTP_400_BAD_REQUEST)
-        except Charge.DoesNotExist:
-            pass
-        return None
-
-    # this method is called to send a charge request to the unpaid_charge web service
-    def create_charge_soap_request(self, request):
-        """this method takes the response from query_cc_soap_request and creates a charge request for the unpaid cheque."""
-        # create a logger object
-        logger = self.setup_logger('charge_soap_request', f'logs/{current_date}/t24_charge_info.log')
-
-        # create a client object
-        client = Client(wsdls['unpaid_charge'])
-
-        # create a dictionary to hold the request parameters
-        request_parameters = {
-            'WebRequestCommon': {
-                'company': tws_co_code, # env variable
-                'password': tws_password,  # env variable
-                'userName': tws_user, # env variable
-            },
-            'OfsFunction': {
-                'gtsControl': 0
-            },
-            'ACCHARGEREQUESTINUNPAIDType': {
-                'DEBITACCOUNT': request.data['charge_account'],
-                'CHARGEDETAIL': 'BENONLY', 
-            }
-        }
-
-        # call the web service in a try block
-        try:
-            response = client.service.InputUnpaidCharge(**request_parameters)
-            # create a response dictionary
-            response_dict = {
-                'charge_success_indicator': response['Status']['successIndicator'],
-                'charge_id': response['Status']['transactionId'],
-                'ofs_id': response['Status']['messageId'],
-                'charge_account': response['ACCHARGEREQUESTType']['DEBITACCOUNT'],
-                'cc_record': request.data['cc_record'],
-            }
-
-            # log the successIndicator, transactionId, messageId, DEBITACCOUNT in one line and return the response
-            logger.info(response_dict)
-            # return a response dictionary that we'll use to create the Charge object
-            return response
-        except Exception as e:
-            # log the T24 error if any else log the error
-            if response['Status']['messages']:
-                logger.error('T24 error: ' + response['Status']['messages'][0])
-            else:
-                logger.error(e)
-            # return the error message
-            return {'error': 'error calling T24 charge web service'}
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly,
+                          IsOwnerOrReadOnly]
 
     # create a charge for a given unpaid cheque object
     def create(self, request, *args, **kwargs):
         """
-        Creates a charge for a given unpaid cheque object.
+        - checks to see if the charge had been collected,
+        - if not, creates a charge object and returns the API response
         """
         # create a logger object
-        logger = self.setup_logger('charge', f'logs/{current_date}/API_response.log')
+        logger = helper.setup_logger('charge', f'logs/{current_date}/API_response.log')
 
         # validate that the charge has not already been collected
-        if self.validate_charge_not_collected(request):
-            return Response(self.validate_charge_not_collected(request), status=status.HTTP_400_BAD_REQUEST)
+        if helper.validate_charge_not_collected(request):
+            return Response(helper.validate_charge_not_collected(request), status=status.HTTP_400_BAD_REQUEST)
 
         # call the web service in a try block
         try:
             # call the web service
-            response = self.create_charge_soap_request(request)
+            response = helper.create_charge_soap_request(request)
 
             # if the response is an error message, return an error message
             if 'error' in response:
@@ -466,8 +168,20 @@ class ChargeViewSet(viewsets.ModelViewSet):
                 'charge_id': response['charge_id'],
                 'ofs_id': response['ofs_id'],
                 'charge_account': response['charge_account'],
-                'cc_record': response['cc_record'],
+                'cc_record': UnpaidCheque.objects.get(ft_ref=request.data['ft_ref'], cheque_account=request.data['charge_account']).cc_record,
+                'charge_amount': response['charge_amount'],
             }
+            # if charge_success_indicator is 'Success', update is_collected as True
+            if response_dict['charge_success_indicator'] == 'Success':
+                response_dict['is_collected'] = True
+
+            # update response_dict with the owner field
+            response_dict['owner'] = self.request.user
+
+            # create and save the Charge object
+            charge = Charge(**response_dict)
+            charge.save()
+
             # return the response
             return Response(response_dict, status=status.HTTP_201_CREATED)
         except Exception as e:

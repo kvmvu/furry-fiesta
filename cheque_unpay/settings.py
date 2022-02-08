@@ -29,7 +29,9 @@ SECRET_KEY = os.getenv('DEV_SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    os.getenv('DEV_HOST'),
+]
 
 
 # Application definition
