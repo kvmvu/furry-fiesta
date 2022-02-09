@@ -11,7 +11,12 @@ class UnpaidChequeSerializer(serializers.HyperlinkedModelSerializer):
     class Meta:
         model = UnpaidCheque
 
-        fields = ['raw_string', 'owner', 'posted_at']
+        fields = ['raw_string', 'owner', 'posted_at', 'voucher_code', 'cheque_number', 'reason_code', 'cheque_amount',
+                'cheque_value_date', 'ft_ref', 'logged_at', 'is_unpaid', 'unpaid_value_date', 'cc_record', 'unpay_success_indicator', 
+                'unpay_error_message', 'cheque_account']
+        read_only_fields = ['posted_at', 'owner', 'voucher_code', 'cheque_number', 'reason_code', 'cheque_amount', 'cheque_value_date',
+                            'ft_ref', 'logged_at', 'is_unpaid', 'unpaid_value_date', 'cc_record', 'unpay_success_indicator', 'unpay_error_message',
+                            'cheque_account']
 
 
 class UserSerializer(serializers.HyperlinkedModelSerializer):
@@ -24,7 +29,7 @@ class UserSerializer(serializers.HyperlinkedModelSerializer):
 
 class ChargeSerializer(serializers.HyperlinkedModelSerializer):
     owner = serializers.ReadOnlyField(source='owner.username')
-    cc_record = serializers.HyperlinkedRelatedField(view_name='unpaid-cheque-details', read_only=True)
+    cc_record = serializers.ReadOnlyField(source='cc_record.cc_record')
 
     class Meta:
         model = Charge

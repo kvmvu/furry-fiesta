@@ -162,28 +162,30 @@ class ChargeViewSet(viewsets.ModelViewSet):
             if 'error' in response:
                 return Response(response, status=status.HTTP_400_BAD_REQUEST)
 
-            # create a response dictionary
-            response_dict = {
-                'charge_success_indicator': response['charge_success_indicator'],
-                'charge_id': response['charge_id'],
-                'ofs_id': response['ofs_id'],
-                'charge_account': response['charge_account'],
-                'cc_record': UnpaidCheque.objects.get(ft_ref=request.data['ft_ref'], cheque_account=request.data['charge_account']).cc_record,
-                'charge_amount': response['charge_amount'],
-            }
-            # if charge_success_indicator is 'Success', update is_collected as True
-            if response_dict['charge_success_indicator'] == 'Success':
-                response_dict['is_collected'] = True
+            # # create a response dictionary
+            # response_dict = {
+            #     'charge_success_indicator': response['charge_success_indicator'],
+            #     'charge_id': response['charge_id'],
+            #     'ofs_id': response['ofs_id'],
+            #     'charge_account': response['charge_account'],
+            #     # 'cc_record': UnpaidCheque.objects.get(ft_ref=request.data['ft_ref'], cheque_account=request.data['charge_account']).cc_record,
+            #     'charge_amount': response['charge_amount'],
+            # }
 
-            # update response_dict with the owner field
-            response_dict['owner'] = self.request.user
+            # if charge_success_indicator is 'Success', update is_collected as True
+            if response['charge_success_indicator'] == 'Success':
+                response['is_collected'] = True
+
+            # update response_dict with the owner field and cc_record field
+            response['owner'] = self.request.user
+            response['cc_record'] = UnpaidCheque.objects.get(ft_ref=request.data['ft_ref'], cheque_account=request.data['charge_account'])
 
             # create and save the Charge object
-            charge = Charge(**response_dict)
+            charge = Charge(**response)
             charge.save()
 
             # return the response
-            return Response(response_dict, status=status.HTTP_201_CREATED)
+            return Response(response, status=status.HTTP_201_CREATED)
         except Exception as e:
             # log the error from the API response creation and return an error message 
             logger.error(e)

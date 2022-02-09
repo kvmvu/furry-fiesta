@@ -6,8 +6,6 @@ from datetime import datetime
 from zeep import Client
 from dotenv import load_dotenv
 from pathlib import Path
-from rest_framework import status
-from rest_framework.response import Response
 from .models import Charge
 
 # define environment variables
@@ -326,20 +324,11 @@ class Helpers:
         # check if there is a cc_record that matches the inputted charge_account and see if is_collected is True
         # if there is a match, return an error response
         if Charge.objects.filter(charge_account=request.data['charge_account'], is_collected=True).exists():
-            logger.error('charge has already been collected for cc_record: ' + Charge.objects.get(charge_account=request['charge_account'], is_collected=True).cc_record)
+            logger.error('charge has already been collected for cc_record: ' + str(Charge.objects.get(charge_account=request.data['charge_account'], is_collected=True).cc_record))
             return {'error': 'charge has already been collected'}
-        # # check if the charge has already been collected
-        # try:
-        #     charge = Charge.objects.get(charge_account=request.data['charge_account'])
-        #     if charge.is_collected:
-        #         # log the error from the web service
-        #         logger.error('charge already collected for cc_record: ' + request.data['cc_record'])
-        #         return Response({'error': 'charge has already been collected'}, status=status.HTTP_400_BAD_REQUEST)
-        # except Charge.DoesNotExist:
-        #     pass
-        # return None
-
-
+        else:
+            return None
+        
     # helper method to send a charge request to the unpaid_charge web service
     def create_charge_soap_request(self, request):
         """
